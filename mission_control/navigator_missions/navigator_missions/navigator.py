@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 from __future__ import division
-
 import os
 import numpy as np
 import yaml
@@ -9,15 +8,12 @@ import rospkg
 from twisted.internet import defer
 from txros import action, util, tf, NodeHandle
 from pose_editor import PoseEditor2
-
 import mil_tools
 from ros_alarms import TxAlarmListener
-
 from navigator_path_planner.msg import MoveAction, MoveGoal
 from nav_msgs.msg import Odometry
 from std_srvs.srv import SetBool, SetBoolRequest
-from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import PointCloud
+from geometry_msgs.msg import PoseStamped, PointStamped
 import navigator_msgs.srv as navigator_srvs
 from topic_tools.srv import MuxSelect, MuxSelectRequest
 from mil_misc_tools.text_effects import fprint
@@ -88,9 +84,9 @@ class Navigator(BaseTask):
         else:
             cls.sim = False
 
-        # Just some pre-created publishers for missions to use for debugging
-        cls._point_cloud_pub = cls.nh.advertise("navigator_points", PointCloud)
-        cls._pose_pub = cls.nh.advertise("navigator_pose", PoseStamped)
+        # For missions to access clicked points / poses
+        cls.rviz_goal = cls.nh.subscribe("/move_base_simple/goal", PoseStamped)
+        cls.rviz_point = cls.nh.subscribe("/clicked_point", PointStamped)
 
         cls._moveto_client = action.ActionClient(cls.nh, 'move_to', MoveAction)
 
@@ -127,8 +123,8 @@ class Navigator(BaseTask):
             fprint("Waiting for odom...", title="NAVIGATOR")
             odom = util.wrap_time_notice(cls._odom_sub.get_next_message(), 2, "Odom listener")
             enu_odom = util.wrap_time_notice(cls._ecef_odom_sub.get_next_message(), 2, "ENU Odom listener")
-            bounds = util.wrap_time_notice(cls._make_bounds(), 2, "Bounds creation")
-            yield defer.gatherResults([odom, enu_odom, bounds])  # Wait for all those to finish
+            # bounds = util.wrap_time_notice(cls._make_bounds(), 2, "Bounds creation")
+            yield defer.gatherResults([odom, enu_odom])  # Wait for all those to finish
 
     @property
     @util.cancellableInlineCallbacks
@@ -165,11 +161,6 @@ class Navigator(BaseTask):
             resp = yield _bounds(navigator_srvs.BoundsRequest())
             if resp.enforce:
                 cls.enu_bounds = [mil_tools.rosmsg_to_numpy(bound) for bound in resp.bounds]
-
-                # Just for display
-                pc = PointCloud(header=mil_tools.make_header(frame='/enu'),
-                                points=np.array([mil_tools.numpy_to_point(point) for point in cls.enu_bounds]))
-                yield cls._point_cloud_pub.publish(pc)
         else:
             fprint("No bounds param found, defaulting to none.", title="NAVIGATOR")
             cls.enu_bounds = None
@@ -272,10 +263,10 @@ class Navigator(BaseTask):
     @classmethod
     @util.cancellableInlineCallbacks
     def _make_alarms(cls):
+        cls.kill_listener = yield TxAlarmListener.init(cls.nh, 'kill', cls.kill_alarm_cb)
         cls.odom_loss_listener = yield TxAlarmListener.init(
             cls.nh, 'odom-kill',
             lambda _, alarm: setattr(cls, 'odom_loss', alarm.raised))
-        cls.kill_listener = yield TxAlarmListener.init(cls.nh, 'kill', cls.kill_alarm_cb)
         fprint("Alarm listener created, listening to alarms: ", title="NAVIGATOR")
 
         cls.kill_alarm = yield cls.kill_listener.get_alarm()
